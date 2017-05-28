@@ -4,13 +4,26 @@ I'm using `$` to denote commands to be run on your local machine, and `%` to den
 
 Instructions for the presenter that require leaving the terminal are in *[italicised brackets]*.
 
-## 00:00 — Introduction
+## 00:00 — Pair everyone up and create their instances
+
+Hopefully this is just a matter of changing the `count` variable and re-running `terraform apply`.
+
+## 00:05 — Introduction
 
 A short introduction to deploying and running a website.
 
-## 00:10 — Make sure everyone has a machine working
+## 00:10 — Distribute connection details
 
-Hopefully not many people will have had trouble installing a VM and setting up SSH keys. In any case, pair them up, so only half of them need to.
+Give everyone an IP address/EC2 hostname and the same SSH key. (I know, but we're all friends here.) Get them to put the SSH key in *~/.ssh/webops* and add the following to their *~/.ssh/config*:
+
+```
+Host webops
+    HostName <hostname>
+    User ubuntu
+    IdentityFile ~/.ssh/webops
+```
+
+Hopefully not many will have trouble SSHing in.
 
 In case everyone has had issues, take 10 minutes to sort them all out.
 
@@ -98,7 +111,8 @@ Now we just tell `supervisorctl`, the control program, to reload its configurati
 
 ```sh
 % sudo supervisorctl
-> restart
+> reread
+> update
 > status
 ... wait 10 seconds
 > status
@@ -107,13 +121,17 @@ Now we just tell `supervisorctl`, the control program, to reload its configurati
 
 And it's running in the background. Lovely.
 
+This is a big advancement: we've gone from running commands to defining a configuration. The former is *imperative*: we know our current state and our desired state, and we invoke a sequence of commands to get there. The latter is *declarative*: we don't know our current state, just our desired state, and the computer figures out the sequence of operations. This is much easier to reason about, and therefore less error-prone, allowing your sysadmin to use their memory for far more useful things.
+
 [Supervisor]: http://supervisord.org/
 
 ## 00:40 — We're still on port 8080
 
 [nginx][] to the rescue. We don't want to run our site as the root user, so we'll use nginx, an HTTP server, to route traffic from port 80 to port 8080.
 
-Delete */etc/nginx/conf.d/default.conf*, and create a file called */etc/nginx/conf.d/predestination.conf*:
+Delete */etc/nginx/sites-enabled/default* to disable the default endpoint.
+
+Next, create a file called */etc/nginx/sites-available/predestination.conf*:
 
 ```
 server {
@@ -127,17 +145,23 @@ server {
 }
 ```
 
+You'll need to enable it by creating a symbolic link in the *sites-enabled* directory:
+
+```sh
+% sudo ln -s /etc/nginx/sites-available/predestination.conf /etc/nginx/sites-enabled/
+```
+
 Next, reload nginx:
 
-```
-% nginx -s reload
+```sh
+% sudo nginx -s reload
 ```
 
 We should now be able to talk to our site without specifying a port.
 
 *[Delete the port from the URL and make sure it works.]*
 
-You might find that while the game loads, it doesn't run. If that's the case, it's because I wrote this on a plane and couldn't get Websockets to forward properly. You can force the application to use HTTP polling rather than Websockets by adding the `TRANSPORTS=polling` environment variable to the supervisor file and reloading the application with `supervisorctl reread`.
+You might find that while the game loads, it doesn't run. If that's the case, it's probably because WebSockets aren't proxying correctly (sorry about that). You can force the application to use HTTP polling rather than Websockets by adding the `TRANSPORTS=polling` environment variable to the supervisor file and reloading the application with `supervisorctl reread`, then `supervisorctl update`.
 
 [nginx]: https://nginx.org/
 
@@ -151,11 +175,21 @@ Can you imagine doing that a second time? Ugh. Our website will be down for ages
 
 Instead, we're going to use an infrastructure automation tool. My favourite is [Ansible][], which is what we're going to use today, but there are plenty of others. The most popular are [Puppet][], [Chef][] and [SaltStack][].
 
-Ansible works over SSH, so there's nothing to do on the server. You just need it installed on the client, along with an *inventory* file. You've already created one called *ansible/inventory*.
+Ansible works over SSH, so there's nothing to do on the server. You just need it installed on the client, along with an *inventory* file. Let's create one now called *ansible/inventory*:
 
-*[Show the inventory file.]*
+```
+[aws]
+<your server IP address> ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/webops
+```
 
-Let's try it.
+If you're on Windows, you can't run Ansible, but don't worry. SSH into your server, install Ansible (`sudo apt install ansible`), clone this repository and create an *ansible/inventory* file as follows:
+
+```
+[local]
+localhost ansible_connection=local
+```
+
+Now, let's try it.
 
 ```sh
 $ export ANSIBLE_INVENTORY=$PWD/ansible/inventory
@@ -170,11 +204,15 @@ Now we'll set up the application:
 ansible-playbook ansible/predestination.yaml
 ```
 
-Voila. Nothing changed (except the application going down for a few seconds). That's because we mostly did all the work already. You'll note that the supervisor was, however, reconfigured—that's because the application was moved from */home/ubuntu/predestination* to */var/www/predestination*.
+Voila. Not much happened (except the application going down for a few seconds). Take a look at the *ansible/predestination.yaml* file, and note the things that changed:
 
-*[Show the playbook and talk through it.]*
+1. The application was re-cloned, because this time we're cloning into a new directory.
+2. The dependencies were re-installed. Actually, nothing happened, but Ansible doesn't know, because it's just running a shell script. We try and avoid running scripts when using configuration management systems such as Ansible, because they can be non-deterministic, and so always have to be run.
+3. We reconfigured the supervisor to point to the new location.
+4. We told the supervisor to restart the application.
+5. We asked nginx to reload its configuration.
 
-Using Ansible (or whatever else), we can easily throw away this server and set up a new one in just a few clicks.
+Using Ansible (or whatever else), we can easily throw away this server and set up a new one in just a few clicks. Once again, we've gone from configuring the server *imperatively* to *declaratively*, allowing us to define the whole state up-front before we start applying the configuration.
 
 [Ansible]: https://www.ansible.com/
 [Chef]: https://www.chef.io/chef/
@@ -283,10 +321,11 @@ Right. Here come the fireworks.
 Docker also packages everything. This means that you don't need to install anything on the server except Docker itself, as the *Docker image* that you build contains all the application dependencies. This includes Python (or whatever you want to use to make your web app).
 
 ```sh
+$ ansible-playbook ansible/predestination-undo.yaml
 $ ansible-playbook ansible/predestination-docker.yaml
 ```
 
-This Ansible playbook removes everything we set up earlier, including the supervisor configuration, nginx configuration and the application itself. It then deploys predestination from the publicly-available [samirtalwar/predestination] Docker image.
+The first Ansible playbook removes everything we set up earlier, including the supervisor configuration, nginx configuration and the application itself. The second deploys predestination from the publicly-available [samirtalwar/predestination] Docker image.
 
 *[Talk through the new playbook.]*
 
